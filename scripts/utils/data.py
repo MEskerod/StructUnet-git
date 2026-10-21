@@ -1,4 +1,4 @@
-import pickle, torch
+import pickle, torch, h5py, string
 
 from collections import namedtuple, defaultdict
 from Bio import SeqIO
@@ -6,6 +6,7 @@ from Bio import SeqIO
 from torch.utils.data import Dataset
 
 import numpy as np
+import pandas as pd
 import random as rd
 
 RNA = namedtuple('RNA', 'input output length family name sequence')
@@ -199,7 +200,7 @@ class SequenceOneHotEncoder:
         onehot = np.array([self.seq_dict[base] for base in sequence])
         return onehot
 
-def make_matrix_from_sequence_8(sequence: str) -> torch.Tensor:
+def make_matrix_from_sequence_8(sequence: str) -> np.ndarray:
     """
     A sequence is converted to a matrix containing all the possible base pairs
     Each pair in encoded as a onehot vector.
@@ -238,11 +239,11 @@ def make_matrix_from_sequence_8(sequence: str) -> torch.Tensor:
         if pair in basepairs and abs(i-j) >=4:
             matrix[i, j, :] = coding[basepairs.index(pair)+2]
 
-    return torch.from_numpy(matrix.transpose(2, 0, 1))
+    return matrix.transpose(2, 0, 1)
 
 BaseEncoder = SequenceOneHotEncoder()
 
-def make_matrix_from_sequence_16(sequence: str) -> torch.Tensor:
+def make_matrix_from_sequence_16(sequence: str) -> np.ndarray:
     """
     A sequence is converted to a matrix containing all the possible base pairs resulting in a 3D matrix with 16 layers
     Each pair in encoded as a onehot vector.
@@ -251,14 +252,14 @@ def make_matrix_from_sequence_16(sequence: str) -> torch.Tensor:
     - sequence (str): The sequence to convert.
 
     Returns:
-    - torch.Tensor: A 3D tensor with shape (16, len(sequence), len(sequence)).
+    - np.ndarray: A 3D array with shape (16, len(sequence), len(sequence)).
     """
     x = BaseEncoder.encode(sequence)
     X =  np.kron(x, x).reshape((len(sequence), len(sequence), 16))
 
-    return torch.from_numpy(X).permute(2, 0, 1)
+    return X.transpose(2, 0, 1)
 
-def make_matrix_from_basepairs(pairs: list, unpaired: bool = True) -> torch.Tensor:
+def make_matrix_from_basepairs(pairs: list, unpaired: bool = True) -> np.ndarray:
     """
     Takes a list of all which base each position in the sequence is paired with. If a base is unpaired pairs[i] = 0.
     From the list a 2D matrix is made, with each cell coresponding to a base pair encoded as 1 and unpaired bases encoded as 1 at the diagonal
@@ -268,11 +269,11 @@ def make_matrix_from_basepairs(pairs: list, unpaired: bool = True) -> torch.Tens
     - unpaired (bool, optional): If True the unpaired bases are encoded as 1 at the diagonal. Default is True.
 
     Returns:
-    - torch.Tensor: A 2D tensor with shape (len(pairs), len(pairs)).
+    - np.ndarray: A 2D array with shape (len(pairs), len(pairs)).
     """
 
     N = len(pairs)
-    matrix = torch.zeros((N,N), dtype=torch.float32)
+    matrix = np.zeros((N,N), dtype=np.float32)
 
     for i, j in enumerate(pairs):
         if isinstance(j, int):
@@ -282,25 +283,51 @@ def make_matrix_from_basepairs(pairs: list, unpaired: bool = True) -> torch.Tens
 
     return matrix
 
+def sample_to_hdf5(h5_file, data: dict, sample: str) -> None:
+    """
+    Takes a dictionary containing the data and writes it to an h5 file
+
+    Parameters:
+    - h5_file: An open h5 file object.
+    - data (dict): A dictionary containing the data to write.
+    - sample (str): The name of the sample to write.
+
+    Returns:
+    - None
+    """
+    grp = h5_file.create_group(sample)
+    
+    for key, value in data.items():
+        try: 
+            if isinstance(value, np.ndarray):
+                grp.create_dataset(key, data=value, compression="gzip", compression_opts=4)
+            elif isinstance(value, int):
+                grp.create_dataset(key, data=value, dtype='i8')
+            else: 
+                grp.create_dataset(key, data=value, dtype=h5py.string_dtype())
+        except Exception as e:
+            raise TypeError(f"Unsupported data type for key '{key}': {type(value)}. Error: {e}")
+
 
 ### HANDLING DATA IN PYTORCH ###
-class ImageToImageDataset(Dataset):
+class SequenceToStructureDataset(Dataset):
     """
     Dataset class for image to image translation
     For each sample, the dataset returns a tuple of input and output images
     Is initialized with a list of file paths to pickle files containing the data
     """
-    def __init__(self, file_list: list) -> None:
-        self.file_list = file_list
+    def __init__(self, h5_file: str) -> None:
+        self.h5 = h5py.File(h5_file, 'r')
+        self.sample_ids = list(self.h5.keys())
 
     def __len__(self) -> int:
-        return len(self.file_list)
+        return len(self.sample_ids)
 
     def __getitem__(self, idx: int) -> tuple:
-      data = pickle.load(open(self.file_list[idx], 'rb'))
-      
-      input_image = data.input
-      output_image = data.output 
+      data = self.h5[self.sample_ids[idx]]
+
+      input_image = torch.from_numpy(data['input'][()]).type(torch.float32)
+      output_image = torch.from_numpy(data['output'][()]).type(torch.float32)
 
       return input_image, output_image
 
@@ -383,3 +410,148 @@ def write_to_stdout(outputfile: str, sequence: str, output: torch.Tensor, seq_na
     print(f"\n\n>{seq_name}\n{sequence}")
     print('\n'.join([' '.join(line) for line in bpseq]))
     print('\n')
+
+    
+### DATA Split/preprocessing utilities ###
+
+def dotbracket_to_pairs(dotbracket: str) -> list:
+    """
+    Convert dot-bracket notation, including pseudoknots, to paired indices.
+
+    Supported pseudoknot symbols:
+    (), [], {}, <>, and letter pairs such as A/a, B/b, etc.
+    """
+    opening_to_closing = {
+        "(": ")",
+        "[": "]",
+        "{": "}",
+        "<": ">",
+    }
+    closing_to_opening = {closing: opening for opening, closing in opening_to_closing.items()}
+
+    stacks = {opening: [] for opening in opening_to_closing}
+    pairs = [None] * len(dotbracket)
+
+    for index, char in enumerate(dotbracket):
+        if char in opening_to_closing:
+            stacks[char].append(index)
+
+        elif char in closing_to_opening:
+            opening = closing_to_opening[char]
+            if stacks[opening]:
+                paired_index = stacks[opening].pop()
+                pairs[index] = paired_index
+                pairs[paired_index] = index
+
+        elif char.isupper():
+            stacks.setdefault(char, []).append(index)
+
+        elif char.islower():
+            opening = char.upper()
+            if stacks.get(opening):
+                paired_index = stacks[opening].pop()
+                pairs[index] = paired_index
+                pairs[paired_index] = index
+
+    return pairs
+
+def pairs_to_dotbracket(pairs, length):
+    """Converts a list of base pairs back into a dot-bracket string with pseudoknot brackets."""
+    # 1. Initialize the structure with dots
+    structure = ["."] * length
+    
+    # 2. Sort pairs to ensure consistent assignment
+    pairs = sorted(pairs, key=lambda x: (x[0], x[1]))
+    
+    # 3. Group pairs into independent layers (pseudo-graph coloring)
+    # Each layer represents a group of nested, non-crossing pairs.
+    layers = []
+    for pair in pairs:
+        assigned = False
+        for layer in layers:
+            # Check if the current pair crosses any pair already in this layer
+            crosses = False
+            for p in layer:
+                # Two pairs (i, j) and (k, l) cross if: i < k < j < l OR k < i < l < j
+                print(pair)
+                i, j = p
+                k, l = pair
+                if (i < k < j < l) or (k < i < l < j):
+                    crosses = True
+                    break
+            if not crosses:
+                layer.append(pair)
+                assigned = True
+                break
+        if not assigned:
+            layers.append([pair])
+            
+    # 4. Define bracket types for each layer
+    bracket_types = [
+        ('(', ')'),
+        ('[', ']'),
+        ('{', '}'),
+        ('<', '>'),
+        ('A', 'a'),
+        ('B', 'b')
+    ]
+    
+    if len(layers) > len(bracket_types):
+        raise ValueError("Structure is too complex: exceeds available bracket types.")
+        
+    # 5. Populate the structure string using the assigned brackets
+    for layer_idx, layer in enumerate(layers):
+        open_bracket, close_bracket = bracket_types[layer_idx]
+        for start, end in layer:
+            if start >= length or end >= length:
+                raise ValueError(f"Pair ({start}, {end}) out of bounds for length {length}")
+            structure[start] = open_bracket
+            structure[end] = close_bracket
+            
+    return "".join(structure)
+
+
+def make_fasta_from_dataframe(df, filename=None):
+    if filename:
+        with open(filename, "w") as f:
+            for _, row in df.iterrows():
+                f.write(f">{row['id']}\n{row['sequence']}\n")
+    else:
+        fasta_str = ""
+        for _, row in df.iterrows():
+            fasta_str += f">{row['id']}\n{row['sequence']}\n"
+        return fasta_str
+    
+def make_dataset_from_fasta_and_dataset(dataset: pd.DataFrame, fasta_filename: str):
+    # Read the fasta file and create a dictionary of sequences
+    sequences = {}
+    with open(fasta_filename, "r") as f:
+        current_id = None
+        for line in f:
+            line = line.strip()
+            if line.startswith(">"):
+                current_id = line[1:]  # Remove the '>' character
+                sequences[current_id] = ""
+            else:
+                sequences[current_id] += line
+    # Create a new DataFrame with only the sequences from the fasta file
+    new_dataset = dataset[dataset['id'].isin(sequences.keys())].copy()
+    return new_dataset
+
+def read_clstr_file(clstr_filename: str):
+    clusters = {}
+    current_cluster = None
+    with open(clstr_filename, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">Cluster"):
+                current_cluster = line.split()[1]
+                clusters[current_cluster] = []
+            else:
+                seq_id = line.split()[2][1:-3]  # Extract the sequence ID
+                clusters[current_cluster].append(seq_id)
+
+    for cluster_id, seq_ids in clusters.items():
+        clusters[cluster_id] = [seq_id for seq_id in seq_ids if "domain" not in seq_id]
+
+    return clusters

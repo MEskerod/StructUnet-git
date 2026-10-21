@@ -1,4 +1,4 @@
-import os, torch
+import os, torch, h5py
 
 import numpy as np
 import pandas as pd
@@ -134,11 +134,7 @@ def calculate_weighted_f1(lengths: list, f1s: list) -> float:
     """
     Calculate the length-weighted F1 score while ignoring missing values.
     """
-    valid = [
-        (length, f1)
-        for length, f1 in zip(lengths, f1s)
-        if pd.notna(length) and pd.notna(f1)
-    ]
+    valid = [(length, f1) for length, f1 in zip(lengths, f1s) if pd.notna(length) and pd.notna(f1)]
     total_length = sum(length for length, _ in valid)
     if total_length == 0:
         return float("nan")
@@ -150,7 +146,7 @@ def compute_sample_metrics(predicted: torch.Tensor, data, device: str = "cpu", t
     Compute per-sequence standard and pseudoknot metrics.
     """
     predicted = ensure_2d_tensor(predicted)
-    target = ensure_2d_tensor(data.output)
+    target = ensure_2d_tensor(torch.from_numpy(data["output"][()]))
 
     precision, recall, f1 = evaluate(predicted, target, device)
     precision_shift, recall_shift, f1_shift = evaluate(predicted, target, device, allow_shift=True)
@@ -167,9 +163,9 @@ def compute_sample_metrics(predicted: torch.Tensor, data, device: str = "cpu", t
     pred_has_pk = bool(pred_pk_pairs)
 
     return {
-        "name": os.path.basename(data.name),
-        "family": data.family,
-        "length": data.length,
+        "name": os.path.basename(data["name"][()].decode("utf-8")),
+        "family": data["family"][()].decode("utf-8"),
+        "length": int(data["length"][()]),
         "precision": precision,
         "recall": recall,
         "f1": f1,
@@ -188,8 +184,47 @@ def compute_sample_metrics(predicted: torch.Tensor, data, device: str = "cpu", t
         "pk_pair_f1": pk_f1,
     }
 
+def compute_sample_metrics_multiple(predicted: dict, data: h5py.Group, device: str = "cpu", threshold: float = 0.5) -> dict:
+    target = ensure_2d_tensor(torch.from_numpy(data["output"][()]))
+    true_pairs = extract_pairs(target, threshold=threshold)
+    true_pk_pairs = find_pseudoknot_pairs(true_pairs)
+    true_has_pk = bool(true_pk_pairs)
 
-def summarize_metrics(df: pd.DataFrame, postprocessing: str, input_dim: int, hidden_dim: int) -> pd.DataFrame:
+    # Initialize the result dictionary
+    result = {"name": os.path.basename(data["name"][()].decode("utf-8")), "family": data["family"][()].decode("utf-8"), "length": int(data["length"][()]), "true_has_pk": true_has_pk, "true_pk_pair_count": len(true_pk_pairs)}
+
+    # Compute metrics for each predicted structure
+    for mode, pred in predicted.items():
+        pred_tensor = ensure_2d_tensor(torch.from_numpy(pred))
+
+        precision, recall, f1 = evaluate(pred_tensor, target, device)
+        precision_shift, recall_shift, f1_shift = evaluate(pred_tensor, target, device, allow_shift=True)
+
+        pred_pairs = extract_pairs(pred_tensor, threshold=threshold)
+        pred_pk_pairs = find_pseudoknot_pairs(pred_pairs)
+        pred_has_pk = bool(pred_pk_pairs)
+
+        # Compute metrics for this prediction
+        tp, fp, fn, pk_precision, pk_recall, pk_f1 = score_pair_sets(pred_pk_pairs, true_pk_pairs)
+
+        result[f"{mode}_precision"] = precision
+        result[f"{mode}_recall"] = recall
+        result[f"{mode}_f1"] = f1
+        result[f"{mode}_precision_shift"] = precision_shift
+        result[f"{mode}_recall_shift"] = recall_shift
+        result[f"{mode}_f1_shift"] = f1_shift
+        result[f"{mode}_has_pk"] = pred_has_pk
+        result[f"{mode}_pk_pair_count"] = len(pred_pk_pairs)
+        result[f"{mode}_pk_pair_tp"] = tp
+        result[f"{mode}_pk_pair_fp"] = fp
+        result[f"{mode}_pk_pair_fn"] = fn
+        result[f"{mode}_pk_pair_precision"] = pk_precision
+        result[f"{mode}_pk_pair_recall"] = pk_recall
+        result[f"{mode}_pk_pair_f1"] = pk_f1
+
+    return result
+
+def summarize_metrics(df: pd.DataFrame, postprocessing: str, input_dim: int) -> pd.DataFrame:
     """
     Produce a one-row summary dataframe for the full evaluation run.
     """
@@ -223,7 +258,6 @@ def summarize_metrics(df: pd.DataFrame, postprocessing: str, input_dim: int, hid
         "n_sequences": len(df),
         "postprocessing": postprocessing,
         "input_dim": input_dim,
-        "hidden_dim": hidden_dim,
         "mean_precision": pd.to_numeric(df["precision"], errors="coerce").mean(),
         "mean_recall": pd.to_numeric(df["recall"], errors="coerce").mean(),
         "mean_f1": pd.to_numeric(df["f1"], errors="coerce").mean(),
@@ -252,7 +286,7 @@ def summarize_by_family(df: pd.DataFrame) -> pd.DataFrame:
     """
     family_rows = []
     for family, group in df.groupby("family", dropna=False):
-        summary_df = summarize_metrics(group.reset_index(drop=True), postprocessing="", input_dim=np.nan, hidden_dim=np.nan)
+        summary_df = summarize_metrics(group.reset_index(drop=True), postprocessing="", input_dim=np.nan)
         row = summary_df.iloc[0].to_dict()
         row["family"] = family
         row["n_sequences"] = len(group)

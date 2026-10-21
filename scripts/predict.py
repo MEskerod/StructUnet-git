@@ -25,14 +25,14 @@ def predict(input: torch.Tensor, model, sequence: str, postprocessing: str = 'un
     else:
         output = (output + output.T)/2
 
-    return blossom_postprocessing(output, sequence, device)
+    return blossom_postprocessing(output, device)
 
 def main(): 
     argparser = argparse.ArgumentParser(description='predict RNA secondary structure from a sequence using StructUnet')
     argparser.add_argument('-i', '--input', type=str, help='input RNA sequence. Can be a sequence or a path to a fasta file', metavar='')
     argparser.add_argument('-o', '--output', type=str, help='path to save the predicted RNA 2D structure. Valid file formats are .ct and .bpseq (Default = stdout)', default=sys.stdout, metavar='')
-    argparser.add_argument('-m', '--model', type=str, help='path to the trained model. (Default is models/RNA_Unet8.pth or models/RNA_Unet16.pth dependent on the input_dim)', default=None, metavar='')
-    argparser.add_argument('--input_dim', type=int, help='number of input channels. (Default = 16)', default=16, metavar='')
+    argparser.add_argument('-m', '--model', type=str, help='path to the trained model. (Default is models/StructUnet8.pth or models/StructUnet16.pth dependent on the input_dim)', default=None, metavar='')
+    argparser.add_argument('--input_dim', type=int, help='number of input channels. (Default = 8)', default=8, metavar='')
     argparser.add_argument('--hidden_dim', type=int, help='number of hidden channels. (Default = 64)', default=64, metavar='')
     argparser.add_argument('--postprocessing', choices=['restricted', 'unrestricted'], default='unrestricted', help="post-processing mode for final predictions. (Default = unrestricted)", metavar='')
     argparser.add_argument('-std', '--only_standardbp', action='store_true', help='deprecated alias for --postprocessing restricted')
@@ -69,8 +69,8 @@ def main():
         args.model = 'models/RNA_Unet16.pth' if args.input_dim == 16 else 'models/RNA_Unet8.pth'
         
         if args.hidden_dim != 64:
-            #Make sure that the hidden_dim is 32, to match the pretrained models
-            raise ValueError('ERROR: No pretrained model available for hidden_dim other than 32')
+            #Make sure that the hidden_dim is 64, to match the pretrained models
+            raise ValueError('ERROR: No pretrained model available for hidden_dim other than 64')
 
     
     print('-- Loading model --')
@@ -85,10 +85,10 @@ def main():
 
     for i, (sequence, seq_name) in enumerate(sequences):
         if args.input_dim == 8:
-            input_matrix = make_matrix_from_sequence_8(sequence).to(device)
+            input_matrix = torch.from_numpy(make_matrix_from_sequence_8(sequence)).to(device)
         elif args.input_dim == 16:
-            input_matrix = make_matrix_from_sequence_16(sequence)
-        
+            input_matrix = torch.from_numpy(make_matrix_from_sequence_16(sequence)).to(device)
+
         output = predict(input_matrix.unsqueeze(0), model, sequence, args.postprocessing, device)
 
         #Add index to output file if multiple sequences are predicted to prevent overwriting

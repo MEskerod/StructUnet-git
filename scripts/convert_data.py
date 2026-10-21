@@ -1,75 +1,38 @@
-import os, tempfile, shutil, tarfile, pickle, sys, multiprocessing, argparse
+import os, sys, argparse, h5py, ast
 
+from pathlib import Path
+from tqdm.contrib.concurrent import process_map
 from tqdm import tqdm
-from functools import partial
-from fnmatch import fnmatch
 
-from utils.data import read_ct, make_matrix_from_sequence_8, make_matrix_from_sequence_16, make_matrix_from_basepairs, split_data
+import pandas as pd
+
+from utils.data import make_matrix_from_sequence_8, make_matrix_from_sequence_16, make_matrix_from_basepairs, sample_to_hdf5
 from utils.plots import plot_families, plot_len_histogram
 
-from collections import namedtuple
-RNA = namedtuple('RNA', 'input output length family name sequence')
 
-def get_folder_size(folder: str) -> float:
-    """
-    Calculate the size of a folder in GB
+class Row: 
+    def __init__(self, values, column_idx): 
+        self.values = values
+        self.column_idx = column_idx
 
-    Parameters:
-    - folder (str): The path to the folder to calculate the size of.
-
-    Returns:
-    float: The size of the folder in GB.
-    """
-    total_size = 0
-    for dirpath, dirnames, filenames in os.walk(folder):
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            total_size += os.path.getsize(fp)
-    
-    gb = total_size/1024/1024/1024
-    return gb
-
-def list_all_files(root: str, pattern = '*.ct') -> list:
-    """
-    List all files in a directory and its subdirectories that match a specific pattern.
-
-    Parameters:
-    - root (str): The path to the root directory.
-    - pattern (str, optional): The pattern to match. Default is '*.ct'.
-
-    Returns:
-    - list: A list of file paths.
-    """
-    ct_files = []
-
-    for path, subdirs, files  in os.walk(root):
-        for file in files:
-            if fnmatch(file, pattern):
-                ct_files.append(os.path.join(path, file))
-    return ct_files
-
-def getFamily(file_name: str) -> str:
-  '''
-  Returns the family of a file in the RNAStralign data set, based on folder structure
-
-  Parameters:
-  - file_name (str): The path to the file to extract the family from.
-  
-  Returns:
-  str: The family of the file.
-
-  '''
-  return '_'.join(file_name.split(os.sep)[5].split('_')[:-1])
+    def __getitem__(self, column): 
+        return self.values[self.column_idx[column]]
 
 
-def process_file(file: str, output_folder: str) -> int:
+def _write_sample(outputdir: str, sample: str, data: dict) -> None:
+    h5_path = os.path.join(outputdir, f'{sample}.h5')
+    with h5py.File(h5_path, 'w') as h5_file:
+        sample_to_hdf5(h5_file, data, sample)
+
+
+def process_file(args) -> int:
     """
     Converts a file from the RNAStralign data set to a pickle file containing a namedtuple with the data.
     The data in the named tuple is the input and output matrices, the length of the sequence, the family and the name of the file.
     Output is saved in the output folder.
 
     Parameters:
-    - file (str): The path to the file to process.
+    - sample (Row): A row from the DataFrame containing the sample data.
     - output_folder (str): The path to the folder to save the output to.
     - input_dim (int, optional): The number of channels in the input tensor being either 8 og 16. Default is 16.
     - RNAStralign (bool, optional): If set, the input data is assumed to be in the RNAStralign format. Default is True.
@@ -77,14 +40,17 @@ def process_file(file: str, output_folder: str) -> int:
     Returns:
     int: 1 if the file was processed successfully, None if an error occurred.
     """
+    sample, output_folder = args
     try: 
-        with open(file, 'r') as f:
-            length = int(f.readline().split()[0]) 
-        if length == 0:
+        file_id, sequence, pairs, family = sample['id'], sample['sequence'], sample['pairs'], sample['family']
+
+        if len(sequence) == 0 or len(pairs) == 0:
+            print(f"Skipping {sample['id']} due to empty sequence or pairs", file=sys.stderr)
             return
-        
-        family = getFamily(file) if RNAStralign else 'unknown'
-        sequence, pairs = read_ct(file)
+        if len(sequence) != len(pairs):
+            print(f"Skipping {sample['id']} due to length mismatch between sequence and pairs", file=sys.stderr)
+            return
+
         length = len(sequence)
         if input_dim == 16:
             input_matrix = make_matrix_from_sequence_16(sequence)
@@ -95,128 +61,96 @@ def process_file(file: str, output_folder: str) -> int:
         if input_matrix.shape[-1] == 0 or output_matrix.shape[-1] == 0:
             return
         
-        sample = RNA(input = input_matrix, output = output_matrix, length = length, family = family, name = file, sequence = sequence)    
-        
-        pickle.dump(sample, open(os.path.join(output_folder, os.path.splitext(os.path.basename(file))[0] + '.pkl'), 'wb'))
+        sample_data = {'input': input_matrix, 'output': output_matrix, 'length': length, 'family': family, 'name': file_id, 'sequence': sequence}
+        _write_sample(output_folder, file_id, sample_data)
+
         return 1
 
     except Exception as e: 
         # Skip this file if an unexpected error occurs during processing
-        print(f"Skipping {file} due to unexpected error: {e}", file=sys.stderr)
+        print(f"Skipping {sample['id']} due to unexpected error: {e}", file=sys.stderr)
         return
 
 
-def process_and_save(file_list: list, output_folder: str) -> None: 
+def process_and_save(data: pd.DataFrame, output_dir: str, cpus:int=1) -> None: 
     """
-    Process a list of files from the RNAStralign data set and save the output to a folder.
-    The conversion is done in parallel using multiprocessing.
+    Process a dataframe of sequences and structures and save the results to a specified output directory. 
+    The processing is done in parallel using multiple CPU cores.
 
     Parameters:
-    - file_list (list): A list of file paths to process.
+    - data (pd.DataFrame): A DataFrame containing the data to process.
     - output_folder (str): The path to the folder to save the output to.
+    - cpus (int): The number of CPU cores to use for parallel processing.
 
     Returns:
     - None
     """
-    total_files = len(file_list)
-
-    os.makedirs(output_folder, exist_ok=True)
-
-    partial_process_file = partial(process_file, output_folder=output_folder)
-    
-    with multiprocessing.Pool() as pool:
-        #Map the process_file function to the list of files
-        results = list(tqdm(pool.imap_unordered(partial_process_file, file_list), total=total_files, file=sys.stdout, desc="Processing files"))
+    column_index = {col: idx for idx, col in enumerate(data.columns)}
+    args_list = [(Row(sample, column_index), output_dir) for sample in data.itertuples(index=False, name=None)] 
+    results = process_map(process_file, args_list, max_workers=cpus, chunksize=1, desc="Converting files", unit="structures")
 
     converted = sum([result for result in results if result is not None])  
     
-    print(f"\n\n{converted} files converted", file=sys.stdout)
+    print(f"{converted} files converted", file=sys.stdout)
 
-def main(): 
+
+def parse_args():
     argparser = argparse.ArgumentParser(description='Convert RNA data to a format suitable for training and evaluation with StructUnet. The data is converted to seperate pickle files containing a namedtuple with the data. The data is split into training, validation and test sets if the split flag is set.')
-    argparser.add_argument('input', type=str, help='path to a gunzipped tar file containing the data set') 
-    argparser.add_argument('output', type=str, help='path to the folder to save the converted data to')
-    argparser.add_argument('--input_dim', type=int, default=8, help='number of channels in the input tensor. Must be either 8 or 16. (Default = 8)', metavar='')
-    argparser.add_argument('-s', '--split', action='store_true', help='if set, the data is split into training, validation and test sets.')
-    argparser.add_argument('-r', '--ratio', nargs=3, type=float, default=[0.8, 0.1, 0.1], help='ratio for splitting the data into training, validation and test sets. (Default = 0.8 0.1 0.1)', metavar='')
-    argparser.add_argument('-d', '--data_distribution', action='store_true', help='if set, the data distribution is plotted')
-    argparser.add_argument('--RNAStralign', action='store_true', help='if set, the input data is assumed to be in the RNAStralign format.')
+    argparser.add_argument('input', type=str, help='path to a tsv file containing the data') 
+    argparser.add_argument('output', type=str, help='name of the HDF5 file without extension.')
+    argparser.add_argument('--input_dim', type=int, default=8, help='number of channels in the input tensor. Must be either 8 or 16. (Default = 8)', metavar='', choices=[8, 16])    
+    argparser.add_argument('--cores', type=int, default=1, help='number of cores to use for parallel processing (Default = 1)', metavar='')
+    argparser.add_argument('--split', type=str, default=None, help='Column name with the split information. If not provided, no splitting is done. (Default = None)', metavar='')
+    argparser.add_argument('--plot', action='store_true', help='If set, plots of the family distribution and length distribution will be generated and saved in "figures". (Default = False)')
+    return argparser.parse_args()
+    
+    
+def main(): 
+    args = parse_args()
 
-
-    args = argparser.parse_args()
-
-    assert args.input_dim in [8, 16], "ERROR: Invalid input_dim. Must be either 8 or 16"
-
-    _, valid_ratio, test_ratio = args.ratio
-
-    global RNAStralign, input_dim
-    RNAStralign = args.RNAStralign
+    global input_dim
     input_dim = args.input_dim
 
-    temp_dir = tempfile.mkdtemp()
+    outputdir = os.path.dirname(args.output) 
+    if outputdir:
+        os.makedirs(outputdir, exist_ok=True)
 
-    try: 
-        with tarfile.open(args.input, 'r:gz') as tar: 
-            print("Extract files", file=sys.stdout)
-            tar.extractall(temp_dir)
-        
-        file_list = list_all_files(temp_dir)
-        print(f'Total of {len(file_list)} files where extracted\n', file=sys.stdout)
+    tmp_dir = os.environ["TMPDIR"]
+    print(f"Loading data from {args.input}", file=sys.stdout)
+    data = pd.read_csv(args.input, sep='\t', converters={"pairs": ast.literal_eval})
+    data["family"] = data["family"].fillna("None")
 
-        print("Convert matrices\n", file=sys.stdout)
-        process_and_save(file_list, args.output)
-    
-    finally:
-        shutil.rmtree(temp_dir)
-    
-    if args.split:
-        print("Splitting data", file=sys.stdout)
+    print(f'Total of {len(data)} structures to convert\n', file=sys.stdout)
 
-        file_list = [os.path.join(args.output, file) for file in os.listdir(args.output)]
-
-        train, valid, test = split_data(file_list, validation_ratio=valid_ratio, test_ratio=test_ratio)
-
-        print("Move test files to different folder", file=sys.stdout)
-
-        os.makedirs(os.path.join(args.output, 'test'), exist_ok=True)
-        for file in test:
-            shutil.move(file, os.path.join(args.output, 'test'))
-        test = [os.path.join(args.output, 'test', os.path.basename(file)) for file in test]
-        pickle.dump(test, open(os.path.join(args.output, 'test.pkl'), 'wb'))
-
-        os.makedirs(os.path.join(args.output, 'train'), exist_ok=True)
-        for file in train+valid:
-            shutil.move(file, os.path.join(args.output, 'train'))
-        train = [os.path.join(args.output, 'train', os.path.basename(file)) for file in train]
-        valid = [os.path.join(args.output, 'train', os.path.basename(file)) for file in valid]
-        pickle.dump(train, open(os.path.join(args.output, 'train.pkl'), 'wb'))
-        pickle.dump(valid, open(os.path.join(args.output, 'valid.pkl'), 'wb'))
-
-        print(f"FILES FOR TRAINING: {len(train)} for training, {len(valid)} for validation", file=sys.stdout)
-        print(f"FILES FOR TESTING: {len(test)}", file=sys.stdout)
-
-        if args.data_distribution:
-            print("\nPlotting data distribution", file=sys.stdout)
-        
-            if RNAStralign:
-                plot_families({"train":train, "valid":valid, "test":test}, output_file=os.path.join(args.output, 'family_distribution.png'))
-            plot_len_histogram({"train":train, "valid":valid, "test":test}, output_file=os.path.join(args.output, 'length_distribution.png'))
-        
-        print("DONE", file=sys.stdout)
-        print(f"Size of folder for training: {get_folder_size(os.path.join(args.output, 'train')):.2f} GB", file=sys.stdout) 
-        print(f"Size of folder for testing: {get_folder_size(os.path.join(args.output, 'test')):.2f} GB", file=sys.stdout)
-    
+    if args.split: 
+        dataframes = {split: (f'{args.output}_{split}.h5', data[data[args.split] == split]) for split in data[args.split].unique()}
     else: 
-        if args.data_distribution:
-            print("\nPlotting data distribution in current working directory", file=sys.stdout)
-        
-            if RNAStralign:
-                plot_families({"all":file_list}, output_file='family_distribution.png')
-            plot_len_histogram({"all":file_list}, output_file='length_distribution.png')
-        
-        print("DONE", file=sys.stdout)
-        print(f"Size of folder with converted files: {get_folder_size(args.output):.2f} GB", file=sys.stdout)
+        dataframes = {'all': (f'{args.output}.h5', data)}
 
+    for split, (output_file, df) in dataframes.items():
+        output_dir = f'{tmp_dir}/{split}'
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"\nConvert matrices and save to {output_file}", file=sys.stdout)
+        print(f"\nConvert matrice in {split} and save to {output_file}", file=sys.stderr)
+        process_and_save(df, output_dir, cpus=args.cores)
+
+        output_dir = Path(output_dir)
+        files = list(output_dir.glob('*.h5'))
+        with h5py.File(output_file, 'w') as h5_file:
+            for sample in tqdm(files, desc=f"Saving to HDF5", unit="files"):
+                with h5py.File(sample, 'r') as h5_in:
+                    sample_id = list(h5_in.keys())[0] # Only one top-level group per sample file
+                    h5_in.copy(sample_id, h5_file, name=sample_id)  # Copy the group to the output HDF5 file
+
+    if args.plot:
+        os.makedirs('figures', exist_ok=True)
+        file_dict = {split: output_file for split, (output_file, _) in dataframes.items()}
+        plot_families(file_dict, os.path.join('figures', os.path.basename(args.input).replace('.tsv', f'{args.input_dim}_family_distribution.png')))
+        if len(file_dict) > 1:
+            plot_len_histogram(file_dict, os.path.join('figures', os.path.basename(args.input).replace('.tsv', f'{args.input_dim}{"_" + args.split if args.split else ""}_length_distribution.png')), split=True)
+        plot_len_histogram(file_dict, os.path.join('figures', os.path.basename(args.input).replace('.tsv', f'{args.input_dim}{"_" + args.split if args.split else ""}_length_distribution_combined.png')), split=False)
+        
+    print("DONE", file=sys.stdout)
 
 
 if __name__ == "__main__": 

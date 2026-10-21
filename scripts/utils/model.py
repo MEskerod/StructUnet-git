@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 
+if not torch.cuda.is_available():
+    import numpy as np
+    from numba import njit
+
 from utils.blossom import max_weight_matching_matrix
 
 ### MODEL ARCHITECTURES ###
@@ -268,7 +272,82 @@ def prepare_postprocessing(matrix: torch.Tensor, sequence: str, device: str) -> 
     
     return matrix
 
-def blossom_postprocessing(matrix: torch.Tensor, sequence: str, device: str, treshold: float = 0.5) -> torch.Tensor: 
+@njit(cache=True)
+def noncrossing_dp(scores, threshold, min_unpaired):
+    n = scores.shape[0]
+    dp = np.zeros((n, n), dtype=np.float32)
+    traceback = np.full((n, n), -1, dtype=np.int32)
+
+    for length in range(1, n):
+        for i in range(n - length):
+            j = i + length
+
+            # Leave j unpaired
+            best = dp[i, j - 1]
+            best_k = -1
+
+            # Pair j with k. The two remaining intervals are independent, which guarantees that selected pairs cannot cross.
+            for k in range(i, j - min_unpaired):
+                weight = scores[k, j]
+
+                # Excludes masked positions and low confidence pairs.
+                if weight < threshold:
+                    continue
+
+                left = dp[i, k - 1] if k > i else 0.0
+                inside = dp[k + 1, j - 1] if k + 1 <= j - 1 else 0.0
+                candidate = left + inside + weight
+
+                if candidate > best:
+                    best = candidate
+                    best_k = k
+
+            dp[i, j] = best
+            traceback[i, j] = best_k
+
+    return traceback
+
+
+def noncrossing_postprocessing(matrix: torch.Tensor, device: str, threshold: float = 0.5, min_unpaired: int = 0) -> torch.Tensor:
+
+    scores = matrix.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
+
+    trace = noncrossing_dp(scores, threshold, min_unpaired)
+    n = scores.shape[0]
+    partners = np.arange(n, dtype=np.int32)
+
+    # Use a stack to avoid recursion depth issues with large sequences
+    stack = [(0, n - 1)]
+
+    while stack: 
+        i, j = stack.pop()
+
+        if i >= j:
+            continue
+
+        k = trace[i, j]
+
+        # If k is -1, it means that j is unpaired, so we continue to the next pair (i, j-1)
+        if k < 0:
+            stack.append((i, j - 1))
+        else:
+            partners[k] = j
+            partners[j] = k
+
+            # Add the two new pairs (i, k-1) and (k+1, j-1) to the stack to continue the traceback
+            if i < k - 1:
+                stack.append((i, k - 1))
+            if k + 1 < j - 1:
+                stack.append((k + 1, j - 1))
+
+    output = torch.zeros_like(matrix, device=device)
+    indices = torch.arange(n, device=device)
+    partner_tensor = torch.from_numpy(partners).to(device=device)
+    output[indices, partner_tensor] = 1
+
+    return output
+
+def blossom_postprocessing(matrix: torch.Tensor, device: str, treshold: float = 0.5) -> torch.Tensor: 
     """
     Postprocessing function that takes a matrix and returns a matrix.
     Uses the blossom algorithm to find the maximum weight matching in the graph representation of the matrix.
@@ -278,7 +357,6 @@ def blossom_postprocessing(matrix: torch.Tensor, sequence: str, device: str, tre
 
     Parameters:
     - matrix (torch.Tensor): The matrix to postprocess.
-    - sequence (str): The sequence that the matrix was generated from.
     - treshold (float): The treshold to use for the matrix.
 
     Returns:
@@ -301,3 +379,19 @@ def blossom_postprocessing(matrix: torch.Tensor, sequence: str, device: str, tre
     y_out[zero_rows, torch.arange(y_out.shape[0], device=device)[zero_rows]] = 1
 
     return y_out
+
+def post_process(prediction: torch.Tensor, sequence: str, postprocessing_mode: str, device: str = "cpu") -> torch.Tensor:
+	assert postprocessing_mode in ["restricted", "unrestricted", "restricted_noncrossing", "unrestricted_noncrossing"], f"Invalid postprocessing mode: {postprocessing_mode}"
+
+	restricted = postprocessing_mode.startswith("restricted")
+	pseudoknots = False if "noncrossing" in postprocessing_mode else True
+
+	if restricted:
+		prediction = prepare_postprocessing(prediction, sequence, device=device)
+	else:
+		prediction = (prediction + prediction.T) / 2
+
+	if pseudoknots:
+		return blossom_postprocessing(prediction, device=device)
+	else:
+		return noncrossing_postprocessing(prediction, device=device)

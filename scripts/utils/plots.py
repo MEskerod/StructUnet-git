@@ -1,59 +1,52 @@
-import torch, pickle
+import torch, h5py
 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import colorcet as cet
 import numpy as np
 import pandas as pd
+
+from collections import defaultdict
 
 def plot_families(file_dict: dict, output_file = None) -> None:
   """
   Plots the distribution of data (families) based on the given file dictionary.
 
-  This function takes a dictionary `file_dict` where the keys represent data set names and the values are lists of files.
+  This function takes a dictionary `file_dict` where the keys represent data set names and the value is the path to a HDF5 file.
   It plots the distribution of data (families) based on the files in the dictionary.
   The resulting plot shows the density of each family across different data sets.
 
   If `output_file` is provided, the plot is saved as an image file at the specified path.
 
   Parameters:
-  - file_dict (dict): A dictionary containing file lists for each data set.
+  - file_dict (dict): A dictionary containing the path to a HDF5 file for each data set.
   - output_file (str, optional): The path to save the plot as an image file. Defaults to None.
 
   Returns:
   - None
   """
-  file_dict = {key:item for key, item in file_dict.items() if len(item)>0}
-
-  file_lists = [item for _, item in file_dict.items()]
-  data_set = [key for key, _ in file_dict.items()]
+  n_files = defaultdict(int)
 
   # Make a dictionary of RNA families and their distribution across data sets
-  RNA_families = {}
-  for index, file_list in enumerate(file_lists):
-    for file in file_list:
-      family = pickle.load(open(file, 'rb')).family
-      if family not in RNA_families:
-        RNA_families[family] = [0]*len(file_lists)
-      
-      RNA_families[family][index] += 1
+  RNA_families = defaultdict(lambda: defaultdict(int))
+  for split, file in file_dict.items():
+    with h5py.File(file, 'r') as h5_file:
+      n_files[split] = len(h5_file.keys())
+      for sample in h5_file.keys(): 
+        family = h5_file[sample]['family'][()].decode('utf-8')  # Decode bytes to string
+        RNA_families[family][split] += 1
 
-  #Sorts the families based on the total number of sequences across all data sets
-  RNA_families = sorted({family:item for family, item in RNA_families.items() if item != ([0]*len(file_lists))}.items(), key=lambda x:x[1])
-  values = [[f[1][i]/len(file_lists[i]) for i in range(len(file_lists))] for f in RNA_families]
-  families = [" ".join(f[0].split('_')) for f in RNA_families]
-
-  x = np.arange(len(families))
+  x = np.arange(len(RNA_families))
   width = 1/len(file_dict)*0.9
-
   fig, ax = plt.subplots(figsize=(10,6))
-  for index in range(len(file_lists)):
-    offset = width*index
-    ax.bar(x+offset, [v[index] for v in values], width=width, edgecolor = 'black', label = data_set[index])
+  for i, split in enumerate(file_dict.keys()):
+    offset = width*i
+    ax.bar(x+offset, [RNA_families[f][split]/n_files[split] for f in RNA_families], width=width, edgecolor = 'black', label = split)
 
   ax.grid(axis = 'y', linestyle = '--')
   ax.set_axisbelow(True)
   ax.set_xticks(x + width / 2)
-  ax.set_xticklabels(families, rotation = 45, ha='right')
+  ax.set_xticklabels([" ".join(f.split('_')) for f in RNA_families], rotation = 45, ha='right')
   if len(file_dict) > 1:
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.94))
 
@@ -63,47 +56,49 @@ def plot_families(file_dict: dict, output_file = None) -> None:
   plt.tight_layout()
 
   if output_file:
-    plt.savefig(output_file, bbox_inches = 'tight')
+    plt.savefig(output_file, bbox_inches = 'tight', dpi = 300)
 
 
-def plot_len_histogram(file_dict: dict, output_file = None) -> None:
+def plot_len_histogram(file_dict: dict, output_file = None, split: bool = False) -> None:
   """
-  Takes a dictionary of file lists and produces a histogram of the distribution of lengths of sequences.
+  Takes a dictionary of file paths and produces a histogram of the distribution of lengths of sequences.
 
   Parameters:
-  - file_dict (dict): A dictionary where the keys are data set names and the values are lists of file paths.
+  - file_dict (dict): A dictionary where the keys are data set names and the values are paths to HDF5 files.
   - output_file (str, optional): The file path to save the histogram plot. If not provided, the plot will be displayed.
+  - split (bool): Whether to split the histogram by data set.
 
   Returns:
   - None
 
   Example usage:
-  >>> file_dict = {'Data Set 1': ['file1.pkl', 'file2.pkl'], 'Data Set 2': ['file3.pkl']}
+  >>> file_dict = {'Data Set 1': 'file1.h5', 'Data Set 2': 'file2.h5'}
   >>> plot_len_histogram(file_dict, output_file='histogram.png')
   """
+  lengths = defaultdict(list)
 
-  file_dict = {key:item for key, item in file_dict.items() if len(item)>0}
-
-  file_lists = [item for _, item in file_dict.items()]
-  data_set = [key for key, _ in file_dict.items()]
-
-  # Takes a list of .pkl files and produces a histogram of the distribution of lengths of sequences
-  lengths = []
-  #Get the lengths of the sequences for each data set
-  for file_list in file_lists:
-    l = []
-    for file in file_list:
-      l.append(pickle.load(open(file, 'rb')).length)
-    lengths.append(l)
+  for data_split, file in file_dict.items():
+    with h5py.File(file, 'r') as h5_file:
+      for sample in h5_file.keys():
+        length = int(h5_file[sample]['length'][()])
+        lengths[data_split].append(length)
 
   plt.figure(figsize=(10,6))
 
-  plt.hist(lengths, bins=50, edgecolor='black', label = data_set, zorder = 3, density = True)
+  if split:
+    data_sets, lenght_lists = zip(*lengths.items())
+    data_sets = list(data_sets)
+    lenght_lists = list(lenght_lists)
+
+    plt.hist(lenght_lists, bins=50, edgecolor='black', label=data_sets, zorder = 3, density = True)
+  else:
+    lengths = [length for length_list in lengths.values() for length in length_list]
+    plt.hist(lengths, bins=50, edgecolor='black', label = '_none', zorder = 3, density = True)
 
   plt.title('Distribution of data (lengths)')
   plt.xlabel('Sequence Length')
   plt.ylabel("Density")
-  if len(file_dict) > 1:
+  if split and len(file_dict) > 1:
     plt.legend(loc='center left', bbox_to_anchor=(1, 0.94))
   plt.grid(axis = 'y', linestyle='--', zorder=0)
   plt.tight_layout()
@@ -232,7 +227,7 @@ def show_matrices(inputs: torch.Tensor, observed: torch.Tensor, predicted: torch
   - None
   """
   #Determines the number of channels in the input tensor
-  input_type = inputs.shape[-1]
+  input_type = inputs.shape[1]
   if input_type == 8:
     onehot_to_image = onehot_to_image_8
   elif input_type == 16:
@@ -294,3 +289,126 @@ def plot_F1(df: pd.DataFrame, outputfile: str) -> None:
     plt.tight_layout()
 
     plt.savefig(outputfile, bbox_inches='tight', dpi=300)
+
+
+def adjacent_values(data: np.ndarray, q1: float, q3: float) -> tuple:
+  """
+  Calculate lower and upper adjacent values for a given data distribution.
+  """
+  iqr = q3 - q1
+  lower = q1 - 1.5 * iqr
+  upper = q3 + 1.5 * iqr
+  return np.clip(lower, np.nanmin(data), q1), np.clip(upper, q3, np.nanmax(data))
+
+def find_outliers(data: np.ndarray, lower:float, upper:float) -> list:
+  """
+  Return values outside the given lower/upper bounds.
+  Ignores NaNs automatically.
+  """
+  return data[(data < lower) | (data > upper)]
+
+def set_axis_style(ax, labels: list, ylabel: str) -> None:
+  """
+  Set the style of the axis in a matplotlib plot.
+
+  Parameters:
+  - ax (matplotlib.axes.Axes): The axes object to modify.
+  - labels (list): The labels for the y-axis ticks.
+  - ylabel (str): The label for the y-axis.
+
+  Returns:
+  None
+  """
+  ax.set_yticks(np.arange(1, len(labels) + 1), labels=labels, fontsize = 12)
+  ax.tick_params(axis='x', labelsize = 12)
+  ax.set_ylim(0.25, len(labels) + 0.75)
+  ax.set_ylabel(ylabel, fontsize = 10)
+  ax.set_xlabel('F1 score', fontsize = 10)
+  ax.tick_params(axis= 'both', which = 'both', bottom = False, left = False)
+  ax.grid(axis = 'x', linestyle = '--', alpha = 0.3, zorder = 0)
+  ax.set_axisbelow(True)
+
+def compute_violin_stats(data: np.ndarray) -> dict: 
+  data = data[~np.isnan(data)]
+  q1, med, q3 = np.nanpercentile(data, [25, 50, 75])
+  lower, upper = adjacent_values(data, q1, q3)
+  out = find_outliers(data, lower, upper)
+
+  return {'q1': q1, 'median': med, 'q3': q3, 'lower': lower, 'upper': upper, 'outliers': out}
+
+def violin_plot(df: pd.DataFrame, ylabel: str, cmap='cet_glasbey_dark', outputfile=None, groups=None) -> None:
+  """
+  Generate a violin plot for the given DataFrame.
+
+  Parameters:
+  - df (pd.DataFrame): The DataFrame containing the data to be plotted.
+  - ylabel (str): The label for the y-axis.
+  - cmap (str, optional): The colormap to be used for coloring the violins. Defaults to 'Accent'.
+  - outputfile (str, optional): The file path to save the plot. If not provided, the plot will be displayed.
+  - groups (list, optional): The groups to be plotted. If not provided, all columns will be plotted.
+
+  Returns:
+  None
+  """
+  #Reverse order of columns such that the first column is the top of the plot
+  df = df[df.columns[::-1]]
+  
+  cmap = mpl.colormaps[cmap].colors
+
+  # Get number of categories to define the size of the plot
+  categories = len(df.columns)
+  fig, ax = plt.subplots(figsize = (10, categories))
+
+  clean_data = [df[col].dropna().to_numpy() for col in df.columns]
+  parts = ax.violinplot(clean_data, showmeans=False, showmedians = False, showextrema = False, vert = False)
+
+  #Change apperance of body
+  for i, pc in enumerate(parts["bodies"]):
+    pc.set_facecolor(cmap[i])
+    pc.set_edgecolor('black')
+    pc.set_alpha(1)
+    pc.set_zorder(2)
+
+  stats = [compute_violin_stats(data) for data in clean_data]
+
+  quartile1 = [s['q1'] for s in stats]
+  medians = [s['median'] for s in stats]
+  quartile3 = [s['q3'] for s in stats]
+  whiskers_min = [s['lower'] for s in stats]
+  whiskers_max = [s['upper'] for s in stats]
+  outliers = [s['outliers'] for s in stats]
+
+  #Add median
+  inds = np.arange(1, len(medians) + 1)
+  ax.scatter(medians, inds, marker='|', color='white', s=30, zorder=3)
+
+  #Add value as text for mean
+  for i, data in enumerate(clean_data):
+    ax.text(1.005, inds[i], f"{np.nanmean(data):.3f}", ha='left', fontsize = 12)
+
+  #Add boxes
+  ax.hlines(inds, quartile1, quartile3, color='k', linestyle='-', lw=5, zorder = 2.5)
+  #Add whiskers
+  ax.hlines(inds, whiskers_min, whiskers_max, color='k', linestyle='-', lw=1, zorder = 2.5)
+
+  #Add outliers
+  for i, out in enumerate(outliers):
+    ax.scatter(out, np.ones_like(out)* inds[i], marker = 'o', s=8, color = 'black', zorder = 2.5)
+
+  #Set style for the axes
+  labels = [' '.join(name.split('_')[:-1]) for name in df.columns]
+  set_axis_style(ax, labels, ylabel) 
+  if groups is not None: 
+    for i in range(1, categories): 
+      if groups[df.columns[i - 1]] != groups[df.columns[i]]:
+        ax.axhline(i + 0.5, color = 'black', linestyle = '--', alpha = 0.5, zorder = 1, linewidth = 0.8)
+  plt.box(False)
+
+  plt.subplots_adjust(bottom=0.15, wspace=0.05)
+
+  plt.tight_layout()
+
+  if outputfile: 
+    plt.savefig(outputfile, dpi = 300, bbox_inches = 'tight')
+
+  plt.close()
