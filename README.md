@@ -3,188 +3,128 @@
 StructUnet is a U-Net-based model for RNA secondary structure prediction.
 
 ## Abstract
-**Background**: RNA secondary structure prediction remains a central challenge in computational biology. While deep-learning methods have improved predictive accuracy, many approaches retain constraints inherited from traditional thermodynamic models, including restrictions on pseudoknots and non-canonical base pairs. Here we present **StructUnet**, a U‑Net-based convolutional neural network that combines an RNA input representation with post‑processing that permits both pseudoknots and non‑canonical interactions. StructUnet was trained on RNAStrAlign and evaluated on the held-out RNAStrAlign test set and the external ArchiveII benchmark.    
-**Results**: Analysis of RNAStrAlign showed that approximately 5\% of annotated base pairs were non-canonical and that these interactions occured in nearly one-third of sequences. Allowing non-canonical base pairs and pseudoknots during decoding improved predictive performance relative to restricted decoding. StructUnet achieved F1‑scores of **0.98** on RNAStrAlign and **0.91** on ArchiveII, outperforming ViennaRNA, CONTRAfold, CNNfold, and Ufold on both benchmarks. StructUnet predicted non-canonical interactions with an F1-score of 0.95 and achieved higher pseudoknot-specific performance than CNNfold while maintaining a low pseudoknot-presence error. Performance remained high for RNA families represented in the training data but decreased for unseen families, highlighting limitations in dataset diversity and model generalisation.    
-**Conclusion**: StructUnet provides evidence that RNA secondary structure prediction can benefit from relaxing historical modelling assumptions that exclude biologically relevant structural features. By enabling prediction of pseudoknots and non-canonical base pairs while maintaining strong benchmark performance, StructUnet broadens the structural scope of deep learning-based RNA secondary structure prediction and highlights the need for more diverse structural datasets.
-
-`TODO`: Add link to publication.  
-
-## Data and Models
-Pretrained models and larger dataset files can be found at [here](https://drive.google.com/drive/folders/15VAdY8AYT4Z6OosgDE6-HZ-c1UZ5YQeW?usp=sharing)
-
-## Overview
-
-This repository contains code for:
-- predicting RNA secondary structures from a sequence or FASTA file
-- converting raw RNA structure datasets into the repository input format
-- training StructUnet on converted datasets
-- predicting and evaluating an entire dataset
-
-The main user-facing scripts are in [`scripts/`](/Users/au579798/Documents/StructUnet-git/scripts).
-
-## Repository structure
-
-```text
-StructUnet-git/
-├── README.md
-├── StructUnet.yml
-├── scripts/
-│   ├── predict.py
-│   ├── convert_data.py
-│   ├── training.py
-│   ├── predict_dataset.py
-│   ├── evaluate_dataset.py
-│   └── utils/
-├── data/
-└── results/
-```
+**Background**: RNA secondary structure prediction remains a central challenge in computational biology. While deep-learning methods have improved predictive accuracy, many approaches retain constraints inherited from traditional thermodynamic models, including restrictions on pseudoknots and non-canonical base pairs. Here we present \textbf{StructUnet}, a U‑Net-based convolutional neural network that combines an RNA input representation with post‑processing that permits both pseudoknots and non‑canonical interactions. StructUnet was trained on RNAStrAlign and evaluated on a held-out, non-overlapping RNAStrAlign test set and the analogous ArchiveII benchmark.    
+**Results**: Analysis of the RNAStrAlign dataset showed that approximately 5\% of the annotated base pairs were non-canonical, attributable to the substantial representation of 16S RNA sequences. Allowing these non-canonical base pairs, along with pseudoknots, during decoding improved predictive performance relative to restricted decoding. StructUnet achieved F1‑scores of \textbf{0.96} on RNAStrAlign and \textbf{0.85} on ArchiveII, outperforming ViennaRNA, CONTRAfold, and CNNfold under the adopted benchmark settings. StructUnet predicted non-canonical interactions with an F1-score of 0.92 and achieved higher pseudoknot-specific performance than CNNfold while maintaining a low pseudoknot-presence error. Performance remained high for RNA families represented in the training data but decreased for unseen families, highlighting limitations in dataset diversity and model generalisation.      
+**Conclusion**: StructUnet provides evidence that RNA secondary structure prediction can benefit from relaxing historical modelling assumptions that exclude interaction types represented in comparative RNA secondary-structure annotations. By enabling prediction of pseudoknots and non-canonical base pairs while maintaining strong benchmark performance, StructUnet broadens the structural scope of deep learning-based RNA secondary structure prediction and highlights the need for more diverse structural datasets.} 
 
 ## Installation
 
-Create the Conda environment from [`StructUnet.yml`](/Users/au579798/Documents/StructUnet-git/StructUnet.yml):
+Run the following from the repository root:
 
 ```bash
 conda env create -f StructUnet.yml
 conda activate StructUnet
 ```
 
-If the environment file contains a fixed local prefix, update it before creating the environment.
+[StructUnet.yml](StructUnet.yml) includes PyTorch, CUDA 12.1, and `gwf`. It targets NVIDIA GPU systems and does not require editing an installation path.
 
-## Data format
+## Data and models
 
-Converted datasets are stored as:
-- one pickle file per sequence
-- pickle file lists such as `train.pkl`, `valid.pkl`, `test.pkl`, or `archive.pkl`
+Download datasets and pretrained checkpoints from the [shared data and model folder](https://drive.google.com/drive/folders/15VAdY8AYT4Z6OosgDE6-HZ-c1UZ5YQeW?usp=sharing). Place datasets in `data/` and checkpoints in `models/`.
 
-Each per-sequence pickle stores:
+The current pipeline converts **TSV tables to HDF5 datasets**. Models support 8- or 16-channel input; use the same `--input_dim` for conversion, training, and prediction.
 
-```python
-namedtuple("RNA", "input output length family name sequence")
-```
-
-where:
-- `input` is the input tensor representation
-- `output` is the target contact map
-- `length` is sequence length
-- `family` is the RNA family label
-- `name` is the source file name
-- `sequence` is the RNA sequence
-
-## Models
-
-By default, the scripts expect pretrained checkpoints in the repository root:
-- `models/RNA_Unet.pth` for 8-channel input
-- `models/RNA_Unet16.pth` for 16-channel input
-
-Custom checkpoints can be supplied with `-m/--model`.
+The examples use `models/StructUnet8_dataA.pth`. Pass your checkpoint with `-m`; otherwise the prediction scripts look for `models/RNA_Unet8.pth` or `models/RNA_Unet16.pth`.
 
 ## Usage
 
-### 1. Predict from sequence or FASTA
+Run commands from the repository root. Use `--help` for additional options.
 
-Use [`scripts/predict.py`](/Users/au579798/Documents/StructUnet-git/scripts/predict.py) to predict one or more structures from a sequence string or FASTA file.
+### Predict from a sequence or FASTA file
 
-Example:
-
-```bash
-python scripts/predict.py -i input.fasta -o prediction.bpseq --input_dim 8 --postprocessing unrestricted
-```
-
-Notes:
-- valid output formats are `.bpseq` and `.ct`
-- `--postprocessing restricted` uses the masked post-processing step
-- `--postprocessing unrestricted` uses the permissive decoding path
-- `-std/--only_standardbp` is currently kept as a compatibility alias for restricted post-processing
-
-### 2. Convert a raw dataset
-
-Use [`scripts/convert_data.py`](/Users/au579798/Documents/StructUnet-git/scripts/convert_data.py) to convert a raw `.tar.gz` archive of `.ct` files into the repository format.
-
-Example:
+[scripts/predict.py](scripts/predict.py) accepts either a sequence string or a FASTA file:
 
 ```bash
-python scripts/convert_data.py input.tar.gz converted_data --input_dim 8 --RNAStralign --split --data_distribution
+mkdir -p results
+python scripts/predict.py -i input.fasta -o results/prediction.bpseq -m models/StructUnet8_dataA.pth --input_dim 8
 ```
 
-This can:
-- convert each structure into a separate pickle file
-- split the dataset into training, validation, and test sets
-- write `train.pkl`, `valid.pkl`, and `test.pkl`
-- optionally plot family and length distributions
+Replace `input.fasta` with a sequence such as `GGGAAACCC` to predict directly. Output supports `.bpseq` and `.ct`; multiple FASTA records produce separate numbered files. Omit `-o` to print structures to the terminal.
 
-### 3. Train a model
+### Prepare a dataset
 
-Use [`scripts/training.py`](/Users/au579798/Documents/StructUnet-git/scripts/training.py) to train StructUnet on a converted dataset.
+[scripts/split_data.py](scripts/split_data.py) prepares TSV tables and train/validation/test labels from source CSVs and an existing cluster file. If you already have prepared TSVs, start with conversion below.
 
-Example:
+The TSV must contain `id`, `sequence`, `pairs`, and `family`. `pairs` is a Python-list literal of zero-based partner indices, with `None` for unpaired bases. A split column such as `split_A` contains `train`, `val`, or `test` labels.
 
 ```bash
-python scripts/training.py converted_data model.pth --input_dim 8 --hidden_dim 64 --epochs 150 -lr 0.01 -wd 0.0 -p 5
+TMPDIR="$(mktemp -d)" 
+python scripts/convert_data.py data/RNAStrAlign.tsv data/converted/RNAStrAlign8_dataA --input_dim 8 --split split_A --cores 4 --plot
 ```
 
-Input requirements:
-- the data directory must contain `train.pkl` and `valid.pkl`
+This creates `RNAStrAlign8_dataA_train.h5`, `RNAStrAlign8_dataA_val.h5`, and `RNAStrAlign8_dataA_test.h5` in `data/converted/`. Omit `--split` to create one HDF5 file for the whole dataset. The output prefix should not include `.h5`.
 
-Training outputs:
-- model checkpoint
-- `training_log/`
-- training history CSV
-- loss and F1 plots
+Use a fresh writable `TMPDIR` for each conversion; temporary files remain there after completion. `--plot` saves dataset distribution plots to `figures/`.
 
-### 4. Predict an entire dataset
+### Train a model
 
-Use [`scripts/predict_dataset.py`](/Users/au579798/Documents/StructUnet-git/scripts/predict_dataset.py) to run inference on every sample in a dataset file list.
-
-Example:
+[scripts/training.py](scripts/training.py) takes training and validation HDF5 files followed by a model name:
 
 ```bash
-python scripts/predict_dataset.py converted_data/test.pkl -o results/predictions -m models/RNA_Unet8.pth --input_dim 8 --postprocessing unrestricted
+mkdir -p models
+python scripts/training.py data/converted/RNAStrAlign8_dataA_train.h5 data/converted/RNAStrAlign8_dataA_val.h5 StructUnet8_dataA --input_dim 8 --epochs 150 --patience 10
 ```
 
-This writes one prediction pickle per sequence to the requested output directory.
+The best checkpoint is saved to `models/StructUnet8_dataA.pth`; logs, history, and plots go to `steps/training_StructUnet8_dataA/`. Use a new model name for an independent run, since existing checkpoints and histories are loaded when present.
 
-### 5. Predict and evaluate an entire dataset
+### Predict or evaluate a dataset
 
-Use [`scripts/evaluate_dataset.py`](/Users/au579798/Documents/StructUnet-git/scripts/evaluate_dataset.py) to predict every sample in a dataset and compute evaluation metrics.
-
-Example:
+To save predictions without computing metrics:
 
 ```bash
-python scripts/evaluate_dataset.py converted_data/test.pkl -o results/evaluation -m models/RNA_Unet8.pth --input_dim 8 --postprocessing unrestricted
+python scripts/predict_dataset.py data/converted/RNAStrAlign8_dataA_test.h5 -o results/predictions.h5 -m models/StructUnet8_dataA.pth --input_dim 8
 ```
 
-This script:
-- predicts each sample in the dataset
-- saves one prediction pickle per sequence
-- writes one row per sequence to `per_sequence_metrics.csv`
-- writes aggregate metrics to `summary_metrics.csv`
-- writes family-level metrics to `family_metrics.csv`
-- writes `per_sequence_F1.png` if plotting succeeds
+To predict and evaluate against the reference structures:
 
-The default evaluation currently includes:
-- precision
-- recall
-- F1
-- precision, recall, and F1 with one-basepair shift allowed
-- weighted F1
-- pseudoknot pair metrics
-- pseudoknot sequence-level metrics
-- false pseudoknot rate
+```bash
+python scripts/evaluate_dataset.py data/converted/RNAStrAlign8_dataA_test.h5 -o StructUnet8_dataA_evaluation -m models/StructUnet8_dataA.pth --input_dim 8
+```
 
-Non-canonical evaluation is intentionally not part of `evaluate_dataset.py`.
+For evaluation, `-o` is a name prefix, not a directory. Predictions and per-sequence, overall, and family-level metric tables go to `results/`; the F1 plot goes to `figures/`. Metrics include precision, recall, F1, shift-tolerant scores, and pseudoknot metrics.
 
-## Outputs
+Both dataset scripts accept `--device auto`, `cpu`, or `cuda`. Their default input dimension is 16, so specify `--input_dim 8` when using an 8-channel model.
 
-The [`results/`](/Users/au579798/Documents/StructUnet-git/results) directory is the default home for evaluation outputs.
+### Post-processing
 
-Typical contents include:
-- `predictions/`
-- `per_sequence_metrics.csv`
-- `summary_metrics.csv`
-- `family_metrics.csv`
-- `per_sequence_F1.png`
+The default is `--postprocessing unrestricted`.
 
+| Mode | Pairing mask | Pseudoknots |
+| --- | --- | --- |
+| `unrestricted` | None | Allowed |
+| `restricted` | Standard pairs and minimum separation | Allowed |
+| `unrestricted_noncrossing` | None | Excluded |
+| `restricted_noncrossing` | Standard pairs and minimum separation | Excluded |
+
+The restricted mask permits AU, CG, and GU pairs in either direction, as well as pairs involving N, with separation greater than three positions. Single-sequence prediction supports only `restricted` and `unrestricted`; the dataset scripts support all four modes.
+
+To compare modes, first save raw predictions with `--postprocessing None`:
+
+```bash
+python scripts/predict_dataset.py data/converted/RNAStrAlign8_dataA_test.h5 -o results/raw_predictions.h5 -m models/StructUnet8_dataA.pth --input_dim 8 --postprocessing None
+python scripts/compare_postprocessing.py results/raw_predictions.h5 data/converted/RNAStrAlign8_dataA_test.h5 -o postprocessing_comparison --cores 4
+```
+
+This adds decoded matrices to the prediction file and saves comparison tables and plots under `results/postprocessing_comparison/` and `figures/postprocessing_comparison/`, including non-canonical-pair and pseudoknot metrics.
+
+## Additional tools
+
+| Script | Purpose |
+| --- | --- |
+| [evaluate_and_plot.py](scripts/evaluate_and_plot.py) | Compare saved predictions against a shared reference dataset |
+| [plot_combined_evaluation.py](scripts/plot_combined_evaluation.py) | Compare F1 distributions from evaluation CSVs |
+| [analysis.py](scripts/analysis.py) | Generate publication analyses and figures from experiment outputs |
+
+## Cluster workflow
+
+[workflow.py](workflow.py) uses `gwf` to connect preparation, training, evaluation, and comparison jobs. Adjust its account, GPU queue, Conda environment, CUDA setup, and input paths for your cluster before running it.
+
+```bash
+gwf status
+gwf run train_StructUnet8_dataA
+gwf run evaluate_model_8_dataA
+```
+
+Targets may also schedule upstream dependencies. The optional ViennaRNA, CONTRAfold, and CNNfold targets reference scripts that are not included in this checkout. The current preprocessing template needs its `echo` quote corrected, and the conversion template's declared family-plot filename needs to match the converter output before relying on workflow completion tracking.
 
 ## Citation
-
-`TODO`: Add citation information after publication.
